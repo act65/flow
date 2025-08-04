@@ -49,7 +49,7 @@ class VelocityNet(nn.Module):
         return out
 
 class FlowBasedPosterior(FlowDistribution):
-    def __init__(self, build_total_log_likelihood_and_grad, dim: int, key_manager: PRNGKeyManager, interpolator: Interpolator, learning_rate: float = 1e-4, distillation_threshold: int = 50, n_steps: int = 100):
+    def __init__(self, build_total_log_likelihood_and_grad, dim: int, key_manager: PRNGKeyManager, interpolator: Interpolator, learning_rate: float = 1e-4, distillation_threshold: int = 50, n_steps: int = 100, num_train_steps: int = 1000):
 
         self.dim = dim
         self.build_total_log_likelihood_and_grad = build_total_log_likelihood_and_grad
@@ -58,6 +58,9 @@ class FlowBasedPosterior(FlowDistribution):
         self.observation_buffer = []
         self.n_steps = n_steps
         self.interpolator = interpolator
+        self.num_train_steps = num_train_steps
+
+        # self.b_sample = super().b_sample
 
         vel_nn = VelocityNet(dim=self.dim)
 
@@ -74,8 +77,8 @@ class FlowBasedPosterior(FlowDistribution):
 
         self.optimizer = optax.chain(
             optax.clip_by_global_norm(1.0),
-            optax.sgd(learning_rate)
-            # optax.adam(learning_rate)
+            # optax.sgd(learning_rate)
+            optax.adam(learning_rate)
         )
         self.opt_state = self.optimizer.init(self.vel_params)
 
@@ -102,16 +105,18 @@ class FlowBasedPosterior(FlowDistribution):
             The target score vector.
         """
         # Get the score from the base model (the prior)
-        s_prior = self.model.get_score_s(params, x, t)
+        s_prior_t = self.model.get_score_s(params, x, t)
 
         # Get the denoiser E[x₁|xₜ] to estimate the final sample
         eta_1 = self.model.get_denoiser_eta1(params, x, t)
 
         # Compute the likelihood score using the denoiser
-        s_likelihood = total_log_likelihood_grad_fn(eta_1, y_data)
+        # we dont have access to likelihoodscore_t, rather we use at t=1
+        s_likelihood_1 = total_log_likelihood_grad_fn(eta_1, y_data)
 
         # Return the combined, guided score
-        return s_prior + guidance_strength * s_likelihood
+        # our bayesian update
+        return s_prior_t + guidance_strength * s_likelihood_1
 
     def get_current_flow(self):
         """
@@ -150,11 +155,10 @@ class FlowBasedPosterior(FlowDistribution):
         f = flow.Flow(b_velocity_fn, self.n_steps)
         return f
 
-    def sample(self, key, shape):
+    def sample(self, key):
         f = self.get_current_flow()
-        n_samples = shape[0]
-        x0_samples = self.base_distribution.b_sample(key, n_samples)
-        x1_samples = f.b_forward(x0_samples)
+        x0_samples = self.base_distribution.sample(key)
+        x1_samples = f.forward(x0_samples)
         return x1_samples
     
     def log_prob(self, x1):
@@ -173,7 +177,6 @@ class FlowBasedPosterior(FlowDistribution):
 
         total_log_likelihood_grad_fn, y_data = self.build_total_log_likelihood_and_grad(self.observation_buffer)
         
-        num_train_steps = 1000
         batch_size = 64
         epsilon = 1e-4
         guidance_strength = 1.0
@@ -182,6 +185,12 @@ class FlowBasedPosterior(FlowDistribution):
         frozen_params = jax.lax.stop_gradient(self.vel_params)
 
         def loss_fn(vel_params, x0_batch, x1_batch, z_batch, t_batch, y_data_arg):
+            """
+            We are not doing stochastic interpolation training as usual.
+            We simply want to force the current score to include the observed data.
+            To Bayesian update via posterior_score = prior_score + likelihood_score.  
+            """
+            
             xt_batch = vmap(self.interpolator)(x0_batch, x1_batch, z_batch, t_batch)
             
             # The score predicted by the current trainable parameters
@@ -205,8 +214,9 @@ class FlowBasedPosterior(FlowDistribution):
             p = optax.apply_updates(vel_params, up)
             return p, opt, loss
 
-        x1_samples_for_training = self.sample(self.key_manager.split(), (1024, ))
-        for step in range(num_train_steps):
+        # TODO not sure about this step!
+        x1_samples_for_training = self.b_sample(self.key_manager.split(), 1024)
+        for step in range(self.num_train_steps):
             # ... (batch creation logic) ...
             batch_x1 = x1_samples_for_training[jax.random.randint(self.key_manager.split(), (batch_size,), 0, x1_samples_for_training.shape[0])]
             batch_x0 = jax.random.normal(self.key_manager.split(), shape=(batch_size, self.dim))

@@ -20,7 +20,7 @@ def test_velocity_net():
 
 def test_flow_based_posterior_end_to_end():
     DIM = 2
-    TRUE_THETA = jnp.array([0.25, -0.43]).T
+    TRUE_THETA = jnp.array([10.2, -6.7]).T
 
     def build_total_log_likelihood_and_grad(observations):
         """
@@ -63,16 +63,21 @@ def test_flow_based_posterior_end_to_end():
         key_manager=key_manager,
         interpolator=interpolator,
         build_total_log_likelihood_and_grad=build_total_log_likelihood_and_grad,
-        distillation_threshold=50 # Use a smaller threshold for testing
+        distillation_threshold=3, # Use a smaller threshold for testing
+        num_train_steps=200
     )
 
     for i in range(21):
         y_obs = TRUE_THETA + jax.random.normal(key_manager.split(), shape=(DIM,))
         posterior.add_observation((y_obs,))
 
-    final_samples = posterior.sample(key_manager.split(), (100,))
+    final_samples = posterior.b_sample(key_manager.split(), 100)
     assert final_samples.shape == (100, DIM)
 
     final_mean = jnp.mean(final_samples, axis=0)
+    # print(final_mean)
+
     # Check that the posterior mean is closer to the true theta than the prior mean (0.0)
     assert jnp.linalg.norm(final_mean - TRUE_THETA) < jnp.linalg.norm(TRUE_THETA)
+    assert jnp.linalg.norm(final_mean - TRUE_THETA) < 1.0
+    assert ValueError()

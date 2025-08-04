@@ -60,9 +60,9 @@ def plot_vf(z, t, a, b, k, v):
 
 def plot_trajectories(z, t, a, b, n, px, py, key, interp):
     key, subkey = random.split(key)
-    xs = px.sample(subkey, n)
+    xs = px.b_sample(subkey, n)
     key, subkey = random.split(key)
-    ys = py.sample(subkey, n)
+    ys = py.b_sample(subkey, n)
 
     k = t.shape[0]  # number of time steps
     e = random.normal(key, (n, k))
