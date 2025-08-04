@@ -92,38 +92,84 @@ class FlowBasedPosterior(FlowDistribution):
         if len(self.observation_buffer) >= self.distillation_threshold:
             self._distill()
 
-    def sample(self, num_samples: int):
-        # TODO include non-parametric examples here.
-        # use the obs to construct an augmented velocity_fn!
-        velocity_fn = lambda x, t: self.model.get_velocity_b(self.vel_params, x, t)
-        f = flow.Flow(velocity_fn, self.n_steps)
+    def _get_target_score(self, params, x, t, total_log_likelihood_grad_fn, y_data, guidance_strength=1.0):
+        """
+        Computes the target score by combining the prior score with likelihood guidance.
 
-        x0_samples = self.base_distribution.sample(self.key_manager.split(), shape=(num_samples, ))
-        print(x0_samples.shape)
+        Args:
+            params: The model parameters to use (can be live or frozen).
+            x: The input position x_t.
+            t: The input time t.
+            total_log_likelihood_grad_fn: The function to compute the likelihood gradient.
+            y_data: The conditioning data for the likelihood.
+            guidance_strength: A scalar to control the strength of the guidance.
+
+        Returns:
+            The target score vector.
+        """
+        # Get the score from the base model (the prior)
+        s_prior = self.model.get_score_s(params, x, t)
+
+        # Get the denoiser E[x₁|xₜ] to estimate the final sample
+        eta_1 = self.model.get_denoiser_eta1(params, x, t)
+
+        # Compute the likelihood score using the denoiser
+        s_likelihood = total_log_likelihood_grad_fn(eta_1, y_data)
+
+        # Return the combined, guided score
+        return s_prior + guidance_strength * s_likelihood
+
+    def get_current_flow(self):
+        """
+        Constructs the flow object with the appropriate velocity field.
+        If observations are present, it uses a guided velocity field.
+        """
+        if not self.observation_buffer:
+            # Unconditional case: just use the model's learned velocity b
+            b_velocity_fn = lambda x, t: self.model.get_velocity_b(self.vel_params, x, t)
+        else:
+            # Guided case: construct the guided velocity b_guided
+            total_log_likelihood_grad_fn, y_data = self.build_total_log_likelihood_and_grad(self.observation_buffer)
+
+            def b_guided_velocity_fn(x, t):
+                # For sampling, we always use the current, live parameters
+                params = self.vel_params
+                
+                # Get the deterministic part of the velocity, v(t,x)
+                v_velocity = self.model.get_velocity_v(params, x, t)
+                
+                # Get the full target score s_guided(t,x) using our new helper
+                s_target = self._get_target_score(
+                    params, x, t, total_log_likelihood_grad_fn, y_data
+                )
+                
+                # Get the interpolator coefficients
+                alpha_t = self.interpolator.alpha(t)
+                dalpha_dt_t = self.interpolator.dalphadt(t)
+                
+                # Reconstruct the guided velocity using the fundamental equation:
+                # b_guided = v - α(t)α'(t) * s_guided
+                return v_velocity - (alpha_t * dalpha_dt_t * s_target)
+
+            b_velocity_fn = b_guided_velocity_fn
+            
+        f = flow.Flow(b_velocity_fn, self.n_steps)
+        return f
+
+    def sample(self, key, shape):
+        f = self.get_current_flow()
+        x0_samples = self.base_distribution.sample(key, shape=shape)
         x1_samples = f.b_forward(x0_samples)
-        print(x1_samples.shape)
         return x1_samples
     
     def log_prob(self, x1):
-        velocity_fn = lambda x, t: self.model.get_velocity_b(self.vel_params, x, t)
-        f = flow.Flow(velocity_fn, self.n_steps)
-
+        f = self.get_current_flow()
         x0 = f.b_backward(x1)
         log_p_x0 = self.base_distribution.log_p(x0)
         log_p_x1 = f.b_push_forward_log_prob(log_p_x0, x0)
 
         return log_p_x1
     
-    def entropy(self, num_samples: int):
-        velocity_fn = lambda x, t: self.model.get_velocity_b(self.vel_params, x, t)
-        f = flow.Flow(velocity_fn, self.n_steps)
-
-        # MCMC estimate
-        x0_samples = jax.random.normal(self.key_manager.split(), shape=(num_samples, self.dim))
-        log_p_x0_samples = jax.scipy.stats.norm.logpdf(x0_samples)
-        log_p_x1_samples =f.push_forward_logp(log_p_x0_samples)
-        return -jnp.sum(log_p_x1_samples * jnp.exp(log_p_x1_samples))
-
     def _distill(self):
         print("\n--- Distilling Likelihood (Unified Stochastic Score-Matching) ---")
         
@@ -131,57 +177,48 @@ class FlowBasedPosterior(FlowDistribution):
             print("Observation buffer is empty. Skipping distillation.")
             return
 
-        # Unpack the grad function and the corresponding y_data
         total_log_likelihood_grad_fn, y_data = self.build_total_log_likelihood_and_grad(self.observation_buffer)
         
-        # --- Hyperparameters ---
         num_train_steps = 1000
         batch_size = 64
         epsilon = 1e-4
-        clip_value = 1.0
         guidance_strength = 1.0
 
+        # Use frozen parameters for calculating the target
         frozen_params = jax.lax.stop_gradient(self.vel_params)
 
-        # loss_fn now needs y_data as an argument
         def loss_fn(vel_params, x0_batch, x1_batch, z_batch, t_batch, y_data_arg):
             xt_batch = vmap(self.interpolator)(x0_batch, x1_batch, z_batch, t_batch)
             
-            prior_eta1 = vmap(self.model.get_denoiser_eta1, in_axes=(None, 0, 0))(frozen_params, xt_batch, t_batch)
-            prior_score = vmap(self.model.get_score_s, in_axes=(None, 0, 0))(frozen_params, xt_batch, t_batch)
-
+            # The score predicted by the current trainable parameters
             pred_score = vmap(self.model.get_score_s, in_axes=(None, 0, 0))(vel_params, xt_batch, t_batch)
 
-            # Use in_axes to tell vmap how to handle the arguments.
-            # 0: map over the first axis of prior_eta1
-            # None: broadcast y_data_arg (do not map over it)
-            likelihood_score = vmap(total_log_likelihood_grad_fn, in_axes=(0, None))(prior_eta1, y_data_arg)
+            # The target score is now calculated cleanly using our helper method
+            # We use the frozen_params here to define a stable target.
+            target_score = vmap(self._get_target_score, in_axes=(None, 0, 0, None, None, None))(
+                frozen_params, xt_batch, t_batch, total_log_likelihood_grad_fn, y_data_arg, guidance_strength
+            )
             
-            target_score = prior_score + guidance_strength * likelihood_score
-            
-            return jnp.sum(( pred_score - jax.lax.stop_gradient(target_score))**2)
+            # The loss is the difference between the predicted score and the (fixed) target score
+            return jnp.sum((pred_score - jax.lax.stop_gradient(target_score))**2)
 
+        # The train_step and training loop remain the same...
         @jit
-        def train_step(vel_params, opt, x0, x1, z, t, y_data_arg): # Add y_data_arg
-            # Pass y_data_arg down to loss_fn
+        def train_step(vel_params, opt, x0, x1, z, t, y_data_arg):
             (loss, (g,)) = value_and_grad(loss_fn, argnums=(0,))(vel_params, x0, x1, z, t, y_data_arg)
-
-            g = jax.tree_util.tree_map(lambda x: jnp.clip(x, -clip_value, clip_value), g)
-
+            g = jax.tree_util.tree_map(lambda x: jnp.clip(x, -1.0, 1.0), g)
             up, opt = self.optimizer.update(g, opt)
             p = optax.apply_updates(vel_params, up)
-
             return p, opt, loss
 
-        x1_samples_for_training = self.sample(num_samples=1024)
+        x1_samples_for_training = self.sample(self.key_manager.split(), (1024, ))
         for step in range(num_train_steps):
-            idx = jax.random.randint(self.key_manager.split(), (batch_size,), 0, x1_samples_for_training.shape[0])
-            batch_x1 = x1_samples_for_training[idx]
+            # ... (batch creation logic) ...
+            batch_x1 = x1_samples_for_training[jax.random.randint(self.key_manager.split(), (batch_size,), 0, x1_samples_for_training.shape[0])]
             batch_x0 = jax.random.normal(self.key_manager.split(), shape=(batch_size, self.dim))
             batch_z = jax.random.normal(self.key_manager.split(), shape=(batch_size, self.dim))
             batch_t = jax.random.uniform(self.key_manager.split(), shape=(batch_size,), minval=epsilon, maxval=1.0 - epsilon)
 
-            # Pass y_data to the training step
             self.vel_params, self.opt_state, loss = train_step(
                 self.vel_params, self.opt_state,
                 batch_x0, batch_x1, batch_z, batch_t,
@@ -192,5 +229,4 @@ class FlowBasedPosterior(FlowDistribution):
 
         self.opt_state = self.optimizer.init(self.vel_params)
         self.observation_buffer = []
-        print("Distillation complete.")
-        print("---\n")
+        print("Distillation complete.\n---")

@@ -2,6 +2,7 @@ import abc
 import jax
 import jax.numpy as jnp
 from jax.scipy.stats import multivariate_normal
+from jax.scipy.special import logsumexp
 
 class Distribution(abc.ABC):
     """Abstract base class for probability distributions."""
@@ -56,6 +57,84 @@ class Gaussian(Distribution):
         """Computes the analytical entropy of the Gaussian distribution."""
         return 0.5 * self.dim * (1.0 + jnp.log(2 * jnp.pi)) + 0.5 * jnp.linalg.slogdet(self.cov)[1]
 
+class GaussianMixture(Distribution):
+    """A Gaussian Mixture Model (GMM) distribution."""
+
+    def __init__(self, weights, means, covs):
+        """
+        Args:
+            weights (jnp.ndarray): A 1D array of shape (n_components,) with the weight of each Gaussian component. Must sum to 1.
+            means (jnp.ndarray): A 2D array of shape (n_components, dim) with the mean of each component.
+            covs (jnp.ndarray): A 3D array of shape (n_components, dim, dim) with the covariance matrix of each component.
+        """
+        self.n_components, self.dim = means.shape
+        
+        # --- Input validation ---
+        assert self.n_components == len(weights), "Number of weights must match number of means."
+        assert self.n_components == len(covs), "Number of covariance matrices must match number of means."
+        assert self.dim == covs.shape[1] and self.dim == covs.shape[2], "Dimensions of covariance matrices are incorrect."
+        assert jnp.isclose(jnp.sum(weights), 1.0), "Component weights must sum to 1."
+
+        self.weights = weights
+        self.means = means
+        self.covs = covs
+        self.log_weights = jnp.log(weights)
+
+    def sample(self, key, shape=(1,)):
+        """
+        Samples from the Gaussian mixture model.
+        This is a two-step process:
+        1. For each sample, choose a component based on the mixture weights.
+        2. Sample from the chosen Gaussian component.
+        """
+        n_samples = shape[0]
+        key_cat, key_samps = jax.random.split(key)
+
+        # 1. Choose a component for each sample
+        component_indices = jax.random.choice(
+            key_cat, self.n_components, shape=(n_samples,), p=self.weights
+        )
+
+        # 2. Get the parameters for the chosen components
+        chosen_means = self.means[component_indices]
+        chosen_covs = self.covs[component_indices]
+
+        # Generate a unique key for each sample and draw from the corresponding Gaussian
+        # We use vmap to efficiently sample from different Gaussians for each row.
+        keys = jax.random.split(key_samps, n_samples)
+        
+        # Define a function to sample one point given one key, mean, and cov
+        def sample_single(k, m, c):
+            return jax.random.multivariate_normal(k, m, c)
+
+        # Vectorize this function to apply it over the batch of keys and parameters
+        samples = jax.vmap(sample_single)(keys, chosen_means, chosen_covs)
+        
+        return samples
+
+    def log_prob(self, x):
+        """
+        Computes the log probability of samples using the log-sum-exp trick for stability.
+        log p(x) = log(sum_k [w_k * N(x|mu_k, cov_k)])
+                 = logsumexp(log(w_k) + log(N(x|mu_k, cov_k)))
+        """
+        # Ensure x is at least 2D for consistent processing
+        x = jnp.atleast_2d(x)
+
+        # Calculate the log probability of each point x under each Gaussian component.
+        # vmap over the points in x. For each point, compute its log_prob under all components.
+        # The inner logpdf call broadcasts the point over all component means and covs.
+        log_probs_all_components = jax.vmap(
+            lambda point: multivariate_normal.logpdf(point, self.means, self.covs)
+        )(x)
+        
+        # Add the log weights and compute the log-sum-exp over the components axis
+        weighted_log_probs = log_probs_all_components + self.log_weights
+        log_p = logsumexp(weighted_log_probs, axis=1)
+        
+        # Squeeze the result if the original input was a single vector
+        return jnp.squeeze(log_p)
+
 
 class FlowDistribution(Distribution):
     """A distribution defined by a deterministic Flow transformation."""
@@ -78,25 +157,10 @@ class FlowDistribution(Distribution):
         y = self.flow.b_forward(x0)
         return y
 
-    def log_prob(self, y):
-        """
-        Computes the log probability of a sample using the change of variables formula.
-        This is achieved by pulling the sample back to the base distribution.
-        log p_Y(y) = log p_X(f^{-1}(y)) + log |det(d f^{-1}(y) / dy)|
-        """
-        # The push_backward_log_prob method computes exactly this.
-        # It returns the log_prob on the base distribution and the final state,
-        # which is the point on the base distribution.
-        logp_y, _ = self.flow.b_push_backward_log_prob(jnp.zeros_like(y[:, 0]), y)
-        
-        # We need to evaluate the log_prob of the base distribution at the
-        # point where y is mapped to by the backward flow.
-        # Let's get the backward trajectory to find the point in the base.
-        x0 = self.flow.b_backward(y)
-        logp_base = self.base.log_prob(x0)
-
-        return logp_base + logp_y
-
+    def log_prob(self, x1):
+        x0 = self.flow.b_backward(x1)
+        log_p_x0 = self.base_distribution.log_p(x0)
+        return self.flow.b_push_forward_log_prob(log_p_x0, x0)
 
 class ProcessDistribution(Distribution):
     """

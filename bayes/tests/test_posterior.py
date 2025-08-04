@@ -3,6 +3,8 @@ import jax
 import jax.numpy as jnp
 from bayes.posterior import FlowBasedPosterior, VelocityNet, PRNGKeyManager
 from sinterp.interpolants import OneSidedLinear
+from bayes.distribution import Gaussian, FlowDistribution
+from flow import flow
 
 def test_velocity_net():
     dim = 2
@@ -74,7 +76,7 @@ def test_flow_based_posterior_end_to_end():
         y_obs = TRUE_THETA + jax.random.normal(key_manager.split(), shape=(DIM,))
         posterior.add_observation((y_obs,))
 
-    final_samples = posterior.sample(num_samples=100)
+    final_samples = posterior.sample(key_manager.split(), (100,))
     assert final_samples.shape == (100, DIM)
 
     final_mean = jnp.mean(final_samples, axis=0)
