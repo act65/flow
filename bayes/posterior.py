@@ -152,7 +152,8 @@ class FlowBasedPosterior(FlowDistribution):
 
     def sample(self, key, shape):
         f = self.get_current_flow()
-        x0_samples = self.base_distribution.sample(key, shape=shape)
+        n_samples = shape[0]
+        x0_samples = self.base_distribution.b_sample(key, n_samples)
         x1_samples = f.b_forward(x0_samples)
         return x1_samples
     

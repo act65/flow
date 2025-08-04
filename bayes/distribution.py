@@ -37,7 +37,7 @@ class Distribution(abc.ABC):
         return vmap(self.sample)(keys)
     
     def b_log_prob(self, x):
-        return vmap(self.log_prob(x))
+        return vmap(self.log_prob)(x)
 
 class Gaussian(Distribution):
     """A standard multivariate Gaussian distribution N(0, I)."""
@@ -159,7 +159,7 @@ class FlowDistribution(Distribution):
 
     def log_prob(self, x1):
         x0 = self.flow.backward(x1)
-        log_p_x0 = self.base_distribution.log_p(x0)
+        log_p_x0 = self.base.log_prob(x0)
         return self.flow.push_forward_log_prob(log_p_x0, x0)
 
 class ProcessDistribution(Distribution):

@@ -9,9 +9,9 @@ key = jax.random.PRNGKey(0)
 def test_gaussian():
     dim = 2
     dist = Gaussian(dim)
-    samples = dist.sample(key, shape=(10,))
+    samples = dist.b_sample(key, 10)
     assert samples.shape == (10, dim)
-    log_probs = dist.log_prob(samples)
+    log_probs = dist.b_log_prob(samples)
     assert log_probs.shape == (10,)
     entropy = dist.entropy
     assert isinstance(entropy.item(), float)
@@ -28,14 +28,14 @@ def test_flow_distribution():
 
     dist = FlowDistribution(flow, base_dist)
 
-    samples = dist.sample(key, shape=(10,))
+    samples = dist.b_sample(key, 10)
     assert samples.shape == (10, dim)
 
-    log_probs = dist.log_prob(samples)
+    log_probs = dist.b_log_prob(samples)
     assert log_probs.shape == (10,)
 
     # For an identity flow, the log_prob should be the same as the base distribution's
-    base_log_probs = base_dist.log_prob(samples)
+    base_log_probs = base_dist.b_log_prob(samples)
     assert jnp.allclose(log_probs, base_log_probs, atol=1e-2)
 
 def test_process_distribution():
@@ -44,17 +44,17 @@ def test_process_distribution():
 
     # Dummy process
     class MockProcess:
-        def b_forward(self, x0, keys):
+        def forward(self, x0, key):
             return x0, None
 
     process = MockProcess()
     dist = ProcessDistribution(process, base_dist)
 
-    samples = dist.sample(key, shape=(10,))
+    samples = dist.b_sample(key, 10)
     assert samples.shape == (10, dim)
 
     with pytest.raises(NotImplementedError):
-        dist.log_prob(samples)
+        dist.b_log_prob(samples)
 
     with pytest.raises(NotImplementedError):
         dist.entropy(key)
