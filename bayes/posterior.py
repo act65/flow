@@ -26,32 +26,26 @@ class PRNGKeyManager:
 class VelocityNet(nn.Module):
     """A simple MLP to model a velocity b(x, t)."""
     dim: int
+    depth: int = 4
+    width: int = 256
     @nn.compact
     def __call__(self, x, t):
-        original_ndim = x.ndim
-        if original_ndim == 1:
-            x = x[None, :]
-
         t = jnp.atleast_1d(t)
-        if t.ndim == 1:
-            t = t[:, None]
-
-        if t.shape[0] == 1 and x.shape[0] > 1:
-            t = jnp.repeat(t, x.shape[0], axis=0)
+        assert x.ndim == 1
+        assert t.ndim == 1
 
         t_emb = nn.Dense(features=32)(t)
         t_emb = nn.relu(t_emb)
 
         inputs = jnp.concatenate([x, t_emb], axis=-1)
 
-        h = nn.Dense(features=128)(inputs)
-        h = nn.relu(h)
-        h = nn.Dense(features=128)(h)
-        h = nn.relu(h)
+        h = nn.Dense(features=self.width)(inputs)
+        for _ in range(self.depth):
+            h = nn.relu(h)
+            h = nn.Dense(features=self.width)(h)
+
         out = nn.Dense(features=self.dim)(h)
 
-        if original_ndim == 1:
-            return out.squeeze(axis=0)
         return out
 
 class FlowBasedPosterior(FlowDistribution):
@@ -164,10 +158,9 @@ class FlowBasedPosterior(FlowDistribution):
     
     def log_prob(self, x1):
         f = self.get_current_flow()
-        x0 = f.b_backward(x1)
-        log_p_x0 = self.base_distribution.log_p(x0)
-        log_p_x1 = f.b_push_forward_log_prob(log_p_x0, x0)
-
+        x0 = f.backward(x1)
+        log_p_x0 = self.base_distribution.log_prob(x0)
+        log_p_x1, _ = f.push_forward_log_prob(log_p_x0, x0)
         return log_p_x1
     
     def _distill(self):
@@ -218,6 +211,8 @@ class FlowBasedPosterior(FlowDistribution):
             batch_x0 = jax.random.normal(self.key_manager.split(), shape=(batch_size, self.dim))
             batch_z = jax.random.normal(self.key_manager.split(), shape=(batch_size, self.dim))
             batch_t = jax.random.uniform(self.key_manager.split(), shape=(batch_size,), minval=epsilon, maxval=1.0 - epsilon)
+
+            # TODO add OT coupling
 
             self.vel_params, self.opt_state, loss = train_step(
                 self.vel_params, self.opt_state,

@@ -57,6 +57,29 @@ class Gaussian(Distribution):
         """Computes the analytical entropy of the Gaussian distribution."""
         return 0.5 * self.dim * (1.0 + jnp.log(2 * jnp.pi)) + 0.5 * jnp.linalg.slogdet(self.cov)[1]
 
+def gmm_log_p(means, covs, log_weights, x):
+    """
+    Computes the log probability of samples using the log-sum-exp trick for stability.
+    log p(x) = log(sum_k [w_k * N(x|mu_k, cov_k)])
+                = logsumexp(log(w_k) + log(N(x|mu_k, cov_k)))
+    """
+    # Ensure x is at least 2D for consistent processing
+    x = jnp.atleast_2d(x)
+
+    # Calculate the log probability of each point x under each Gaussian component.
+    # vmap over the points in x. For each point, compute its log_prob under all components.
+    # The inner logpdf call broadcasts the point over all component means and covs.
+    log_probs_all_components = jax.vmap(
+        lambda point: multivariate_normal.logpdf(point, means, covs)
+    )(x)
+    
+    # Add the log weights and compute the log-sum-exp over the components axis
+    weighted_log_probs = log_probs_all_components + log_weights
+    log_p = logsumexp(weighted_log_probs, axis=1)
+    
+    # Squeeze the result if the original input was a single vector
+    return jnp.squeeze(log_p)
+
 class GaussianMixture(Distribution):
     """A Gaussian Mixture Model (GMM) distribution."""
 
@@ -113,28 +136,7 @@ class GaussianMixture(Distribution):
         return samples
 
     def log_prob(self, x):
-        """
-        Computes the log probability of samples using the log-sum-exp trick for stability.
-        log p(x) = log(sum_k [w_k * N(x|mu_k, cov_k)])
-                 = logsumexp(log(w_k) + log(N(x|mu_k, cov_k)))
-        """
-        # Ensure x is at least 2D for consistent processing
-        x = jnp.atleast_2d(x)
-
-        # Calculate the log probability of each point x under each Gaussian component.
-        # vmap over the points in x. For each point, compute its log_prob under all components.
-        # The inner logpdf call broadcasts the point over all component means and covs.
-        log_probs_all_components = jax.vmap(
-            lambda point: multivariate_normal.logpdf(point, self.means, self.covs)
-        )(x)
-        
-        # Add the log weights and compute the log-sum-exp over the components axis
-        weighted_log_probs = log_probs_all_components + self.log_weights
-        log_p = logsumexp(weighted_log_probs, axis=1)
-        
-        # Squeeze the result if the original input was a single vector
-        return jnp.squeeze(log_p)
-
+        return gmm_log_p(self.means, self.covs, self.log_weights, x)
 
 class FlowDistribution(Distribution):
     """A distribution defined by a deterministic Flow transformation."""

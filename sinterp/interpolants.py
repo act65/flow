@@ -222,5 +222,7 @@ def get_interp(name, sigma=1e-3):
         return ConstantNoise(sigma=sigma)
     elif name == "TrigonometricStochastic":
         return TrigonometricStochastic()
+    elif name == "OneSidedLinear":
+        return OneSidedLinear()
     else:
         raise ValueError(f"Unknown interp name: {name}")

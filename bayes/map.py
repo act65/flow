@@ -1,9 +1,24 @@
+import jax
+import jax.numpy as jnp
+from jax import grad, jit, vmap, value_and_grad, random
+from functools import partial
+
+import flax.linen as nn
+import optax
+
+from sinterp.interpolants import (
+    get_interp, 
+    Interpolator, 
+    OneSidedLinear)
+from sinterp.stochasticfield import OneSidedField
+from flow import flow
+from bayes.distribution import Gaussian, FlowDistribution
 from bayes.posterior import FlowBasedPosterior, PRNGKeyManager
 
 class ParameterNet(nn.Module):
     """An MLP to parameterize a search variable x."""
     dim: int
-    hidden_dim: int = 256
+    hidden_dim: int = 512
 
     @nn.compact
     def __call__(self, z):
@@ -31,11 +46,16 @@ def find_map_with_overparameterization(
     # 1. Define the reparameterizing network and its parameters
     param_net = ParameterNet(dim=dim, hidden_dim=hidden_dim)
     # A fixed, dummy input for the network
-    dummy_input = jnp.zeros((1,))
+    dummy_input = random.normal(key_manager.split(), shape=(dim, ))
+    dummy_batch = dummy_input[None, :]
     param_net_params = param_net.init(key_manager.split(), dummy_input)['params']
 
     # 2. Set up the optimizer
-    optimizer = optax.adam(learning_rate)
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adam(learning_rate)
+    )
+
     opt_state = optimizer.init(param_net_params)
 
     # 3. Define the loss function to be minimized
@@ -50,6 +70,7 @@ def find_map_with_overparameterization(
     # 4. JIT-compile the training step for efficiency
     @jit
     def step(params, opt_state):
+        # NOTE do we need stochasticity in the optimisation!!?
         loss_value, grads = value_and_grad(loss_fn)(params)
         updates, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
@@ -71,44 +92,3 @@ def find_map_with_overparameterization(
     print(f"Found MAP estimate x: {x_map}")
 
     return x_map, final_log_prob
-
-
-if __name__ == '__main__':
-    # 1. Setup
-    DIM = 2
-    SEED = 42
-    key_manager = PRNGKeyManager(SEED)
-
-    # 2. Define a "true" parameter for our likelihood to target
-    true_x = jnp.array([2.5, -3.0])
-    print(f"True parameter x to be found: {true_x}")
-
-    # 3. Create a dummy likelihood function builder
-    # This function's gradient will "guide" the posterior towards true_x
-    def make_dummy_likelihood(target_x):
-        def build_total_log_likelihood_and_grad(observations):
-            def total_log_likelihood_grad_fn(x):
-                # Gradient of log N(y|x,I) w.r.t. x is (y-x)
-                # We assume a single observation y=target_x
-                return target_x - x
-            return None, total_log_likelihood_grad_fn
-        return build_total_log_likelihood_and_grad
-
-    # 4. Instantiate and "train" the posterior
-    # The distillation process will absorb the information from the likelihood
-    # (i.e., that the posterior should be centered around true_x)
-    posterior = FlowBasedPosterior(
-        build_total_log_likelihood_and_grad=make_dummy_likelihood(true_x),
-        dim=DIM,
-        key_manager=key_manager,
-        interpolator=OneSidedLinear(),
-        distillation_threshold=1 # Distill immediately for this demo
-    )
-    # Add a dummy observation to trigger the distillation process
-    posterior.add_observation({'data': 1})
-
-    # 5. Find the MAP estimate using the overparameterization method
-    x_map_found, log_prob_at_map = find_map_with_overparameterization(
-        posterior,
-        key_manager
-    )
