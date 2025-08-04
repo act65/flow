@@ -13,8 +13,8 @@ from functools import partial
 import fire
 
 def main(savedir, interp_name):
-    m = 3
-    n = 2
+    m = 3  # m modes in dist 0
+    n = 2  # n modes in dist 1
 
     px, py = many_g(m, n, std=0.1)
     mxs, cxs, wxs = extract_params(px)
