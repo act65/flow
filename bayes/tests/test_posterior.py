@@ -24,18 +24,41 @@ def test_velocity_net():
 
 def test_flow_based_posterior_end_to_end():
     DIM = 2
-    TRUE_THETA = jnp.array([0.25, -0.43])
+    TRUE_THETA = jnp.array([0.25, -0.43]).T
 
     def build_total_log_likelihood_and_grad(observations):
+        """
+        Builds a function that computes the gradient of the total log-likelihood
+        and returns the data required for that function.
+        """
         y_data = jnp.array([obs[0] for obs in observations])
-        def total_log_likelihood(theta):
-            if y_data.shape[0] == 0:
-                return 0.0
-            else:
-                log_likelihoods = jax.scipy.stats.norm.logpdf(y_data, loc=theta, scale=1.0)
-                return jnp.sum(jnp.sum(log_likelihoods, axis=-1))
-        return jax.jit(total_log_likelihood), jax.jit(jax.grad(total_log_likelihood))
 
+        # 1. Define log-likelihood for a SINGLE observation y_i and a single theta.
+        def single_log_likelihood(theta, y_i):
+            # theta shape: (2,), y_i shape: (2,)
+            return jnp.sum(jax.scipy.stats.norm.logpdf(y_i, loc=theta, scale=1.0))
+
+        # 2. Create a function that computes the gradient of the total log likelihood.
+        def total_log_likelihood_grad(theta, y_data_arg):
+            # To get the total gradient, we sum the gradients from each data point.
+            # We can get the gradients for all data points by vmapping the gradient
+            # of the single_log_likelihood function.
+
+            # Get the gradient function for a single observation.
+            grad_fn_single = jax.grad(single_log_likelihood, argnums=0)
+
+            # Map this gradient function over all the data points in y_data_arg.
+            # in_axes=(None, 0) means:
+            #   - Don't map over theta (it's treated as constant for this vmap).
+            #   - Map over the first axis of y_data_arg.
+            all_grads = jax.vmap(grad_fn_single, in_axes=(None, 0))(theta, y_data_arg)
+
+            # all_grads has shape (num_observations, dim). Sum them to get the total gradient.
+            return jnp.sum(all_grads, axis=0)
+
+        # 3. JIT the final gradient function and return it along with the data.
+        return jax.jit(total_log_likelihood_grad), y_data
+    
     key_manager = PRNGKeyManager(seed=42)
     interpolator = OneSidedLinear()
 
@@ -47,8 +70,8 @@ def test_flow_based_posterior_end_to_end():
         distillation_threshold=10 # Use a smaller threshold for testing
     )
 
-    for i in range(11):
-        y_obs = TRUE_THETA.T + jax.random.normal(key_manager.split(), shape=(DIM,))
+    for i in range(21):
+        y_obs = TRUE_THETA + jax.random.normal(key_manager.split(), shape=(DIM,))
         posterior.add_observation((y_obs,))
 
     final_samples = posterior.sample(num_samples=100)
