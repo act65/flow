@@ -75,7 +75,7 @@ class FlowDistribution(Distribution):
         Assumes the flow maps from the base (Gaussian) to the target distribution.
         """
         x0 = self.base.sample(key, shape)
-        y, _ = self.flow.b_forward(x0)
+        y = self.flow.b_forward(x0)
         return y
 
     def log_prob(self, y):
@@ -87,12 +87,12 @@ class FlowDistribution(Distribution):
         # The push_backward_log_prob method computes exactly this.
         # It returns the log_prob on the base distribution and the final state,
         # which is the point on the base distribution.
-        logp_y, _ = self.flow.b_push_backward_log_prob(jnp.log(1.0), y) # Start with log(1.0) = 0
+        logp_y, _ = self.flow.b_push_backward_log_prob(jnp.zeros_like(y[:, 0]), y)
         
         # We need to evaluate the log_prob of the base distribution at the
         # point where y is mapped to by the backward flow.
         # Let's get the backward trajectory to find the point in the base.
-        _, x0 = self.flow.b_backward(y)
+        x0 = self.flow.b_backward(y)
         logp_base = self.base.log_prob(x0)
 
         return logp_base + logp_y
@@ -121,7 +121,7 @@ class ProcessDistribution(Distribution):
         """
         keys = jax.random.split(key, shape[0])
         x0 = self.base.sample(key, shape)
-        y, _ = self.process.b_forward(x0, keys)
+        y = self.process.b_forward(x0, keys)[0]
         return y
 
     def log_prob(self, x):

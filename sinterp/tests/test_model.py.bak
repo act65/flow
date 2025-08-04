@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 
 # Assume these are imported from your library, sinterp.model
-from sinterp.sinterp.stochasticfield import (
+from sinterp.stochasticfield import (
     GenerativeModel,
     OneSidedFlowModel)
 from sinterp.interpolants import (
