@@ -1,0 +1,9 @@
+jax
+jaxlib
+pytest
+matplotlib
+parameterized
+POT
+scipy
+flax
+optax

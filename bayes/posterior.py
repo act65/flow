@@ -28,22 +28,31 @@ class VelocityNet(nn.Module):
     dim: int
     @nn.compact
     def __call__(self, x, t):
-        # x will have shape [batch, dim]
-        t = jnp.atleast_1d(t)
-        # t will have shape [batch, 1]
+        original_ndim = x.ndim
+        if original_ndim == 1:
+            x = x[None, :]
 
-        # No need for atleast_1d, t is already batched.
+        t = jnp.atleast_1d(t)
+        if t.ndim == 1:
+            t = t[:, None]
+
+        if t.shape[0] == 1 and x.shape[0] > 1:
+            t = jnp.repeat(t, x.shape[0], axis=0)
+
         t_emb = nn.Dense(features=32)(t)
         t_emb = nn.relu(t_emb)
 
-        # Concatenate along the last axis (the feature axis)
         inputs = jnp.concatenate([x, t_emb], axis=-1)
 
         h = nn.Dense(features=128)(inputs)
         h = nn.relu(h)
         h = nn.Dense(features=128)(h)
         h = nn.relu(h)
-        return nn.Dense(features=self.dim)(h)
+        out = nn.Dense(features=self.dim)(h)
+
+        if original_ndim == 1:
+            return out.squeeze(axis=0)
+        return out
 
 class FlowBasedPosterior(FlowDistribution):
     def __init__(self, build_total_log_likelihood_and_grad, dim: int, key_manager: PRNGKeyManager, interpolator: Interpolator, learning_rate: float = 1e-4, distillation_threshold: int = 50, n_steps: int = 100):
