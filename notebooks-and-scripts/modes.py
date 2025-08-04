@@ -55,14 +55,14 @@ def main(savedir=".", interp_name="LinearDeterministic"):
     p0_means = jnp.array([[0.0]])      # Shape: (n_components, dim) -> (1, 1)
     p0_covs = jnp.array([[[1.0]]])     # Shape: (n_components, dim, dim) -> (1, 1, 1)
     p0_weights = jnp.array([1.0])      # Shape: (n_components,) -> (1,)
-    px = GaussianMixture(p0_weights, p0_means, p0_covs)
+    py = GaussianMixture(p0_weights, p0_means, p0_covs)
 
     # --- Define p_1: A Gaussian Mixture Model ---
     # CORRECTED: Parameters are now jax.numpy.ndarrays
     p1_means = jnp.array([[-6.0], [4.0]])  # Shape: (2, 1)
     p1_covs = jnp.array([[[0.0001]], [[2.0]]]) # Shape: (2, 1, 1)
     p1_weights = jnp.array([0.2, 0.8])     # Shape: (2,)
-    py = GaussianMixture(p1_weights, p1_means, p1_covs)
+    px = GaussianMixture(p1_weights, p1_means, p1_covs)
 
 
     # --- Monkey-patch helper methods for plotting ---
