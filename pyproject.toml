@@ -10,13 +10,23 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = { file = "LICENSE" }
 authors = [
-  { name="act65", email="te1farac@gmail.com" },
+    { name="act65", email="te1farac@gmail.com" },
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
+dependencies = [
+    "numpy",
+    "scipy",
+    "torch>=1.10", # Example dependency, replace with your actual needs
+    "matplotlib",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/act65/sinterp" # Replace with your project's URL
+"Bug Tracker" = "https://github.com/act65/sinterp/issues" # Replace with your project's issue tracker
 
 [tool.setuptools]
 packages = ["bayes", "flow", "sinterp"]
