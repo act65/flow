@@ -26,7 +26,7 @@ class ParameterNet(nn.Module):
     # this isnt quite the same thing tho
     dim: int
     hidden_dim: int = 512
-    depth: int = 3
+    depth: int = 6
 
     # The setup method is where we define our trainable parameters.
     def setup(self):

@@ -146,21 +146,22 @@ class FlowDistribution(Distribution):
             base_distribution (Distribution): The base distribution (e.g., Gaussian).
         """
         self.flow = flow
-        self.base = base_distribution
+        self.base_distribution = base_distribution
 
     def sample(self, key):
         """
         Generates samples by transforming samples from the base distribution.
         Assumes the flow maps from the base (Gaussian) to the target distribution.
         """
-        x0 = self.base.sample(key)
+        x0 = self.base_distribution.sample(key)
         y = self.flow.forward(x0)
         return y
 
     def log_prob(self, x1):
         x0 = self.flow.backward(x1)
-        log_p_x0 = self.base.log_prob(x0)
-        return self.flow.push_forward_log_prob(log_p_x0, x0)
+        log_p_x0 = self.base_distribution.log_prob(x0)
+        log_p_x1, _ = self.flow.push_forward_log_prob(log_p_x0, x0)
+        return log_p_x1
 
 class ProcessDistribution(Distribution):
     """
@@ -177,14 +178,14 @@ class ProcessDistribution(Distribution):
             base_distribution (Distribution): The base distribution (e.g., Gaussian).
         """
         self.process = process
-        self.base = base_distribution
+        self.base_distribution = base_distribution
 
     def sample(self, key):
         """
         Generates samples by solving the forward SDE from base samples.
         """
         key1, key2 = jax.random.split(key)
-        x0 = self.base.sample(key1)
+        x0 = self.base_distribution.sample(key1)
         y = self.process.forward(x0, key2)[0]
         return y
 

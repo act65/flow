@@ -16,7 +16,7 @@ def test_parameter_net():
 
 def test_find_map_with_gmm():
     dim = 2
-    key_manager = PRNGKeyManager(seed=42)
+    key_manager = PRNGKeyManager(seed=2)
 
     # 1. Create a GMM with two modes, one with a higher weight
     means = jnp.array([
