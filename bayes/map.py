@@ -16,16 +16,39 @@ from bayes.distribution import Gaussian, FlowDistribution
 from bayes.posterior import FlowBasedPosterior, PRNGKeyManager
 
 class ParameterNet(nn.Module):
-    """An MLP to parameterize a search variable x."""
+    """
+    An MLP that starts from a trainable vector instead of an external input.
+    
+    This is useful when the goal is to optimize a fixed, learned starting point
+    that gets transformed by a neural network.
+    """
+    # NOTE what's the other name for this? an implicit representation?
+    # this isnt quite the same thing tho
     dim: int
     hidden_dim: int = 512
+    depth: int = 3
 
+    # The setup method is where we define our trainable parameters.
+    def setup(self):
+        # We declare a new trainable parameter using self.param().
+        # The parameter is named 'trainable_z' and is initialized with a
+        # normal distribution. Its shape is (self.hidden_dim,).
+        self.trainable_z = self.param(
+            'trainable_z',
+            jax.nn.initializers.normal(stddev=1.0),
+            (self.hidden_dim,)
+        )
+
+    # The __call__ method now takes no external input 'z'.
+    # It directly uses the 'trainable_z' parameter defined in the setup method.
     @nn.compact
-    def __call__(self, z):
-        x = nn.Dense(features=self.hidden_dim)(z)
+    def __call__(self):
+        # The trainable vector 'trainable_z' becomes the input to the first layer.
+        x = nn.Dense(features=self.hidden_dim)(self.trainable_z)
         x = nn.relu(x)
-        x = nn.Dense(features=self.hidden_dim)(x)
-        x = nn.relu(x)
+        for _ in range(self.depth):
+            x = nn.Dense(features=self.hidden_dim)(x)
+            x = nn.relu(x)
         x = nn.Dense(features=self.dim)(x)
         return x
 
@@ -45,10 +68,7 @@ def find_map_with_overparameterization(
 
     # 1. Define the reparameterizing network and its parameters
     param_net = ParameterNet(dim=dim, hidden_dim=hidden_dim)
-    # A fixed, dummy input for the network
-    dummy_input = random.normal(key_manager.split(), shape=(dim, ))
-    dummy_batch = dummy_input[None, :]
-    param_net_params = param_net.init(key_manager.split(), dummy_input)['params']
+    param_net_params = param_net.init(key_manager.split())['params']
 
     # 2. Set up the optimizer
     optimizer = optax.chain(
@@ -63,7 +83,7 @@ def find_map_with_overparameterization(
     # MINIMIZING -posterior.log_prob(x), where x = NN(theta).
     def loss_fn(params):
         # Generate the candidate x from the network
-        x_candidate = param_net.apply({'params': params}, dummy_input)
+        x_candidate = param_net.apply({'params': params})
         x_candidate = jnp.squeeze(x_candidate)
         return -posterior.log_prob(x_candidate)
 
@@ -83,7 +103,7 @@ def find_map_with_overparameterization(
             print(f"Step {i}, Negative Log Posterior: {loss:.4f}")
 
     # 6. Get the final MAP estimate by applying the optimized parameters
-    x_map = param_net.apply({'params': param_net_params}, dummy_input)
+    x_map = param_net.apply({'params': param_net_params})
     x_map = jnp.squeeze(x_map)
     final_log_prob = posterior.log_prob(x_map)
 

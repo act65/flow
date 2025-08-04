@@ -1,5 +1,6 @@
 import abc
 import jax
+from jax import vmap, random
 import jax.numpy as jnp
 from jax.scipy.stats import multivariate_normal
 from jax.scipy.special import logsumexp
@@ -8,7 +9,7 @@ class Distribution(abc.ABC):
     """Abstract base class for probability distributions."""
 
     @abc.abstractmethod
-    def sample(self, key, shape=(1,)):
+    def sample(self, key):
         """Samples from the distribution."""
         raise NotImplementedError
 
@@ -30,7 +31,13 @@ class Distribution(abc.ABC):
         samples = self.sample(key, shape=(n_samples,))
         log_probs = self.log_prob(samples)
         return -jnp.mean(log_probs)
-
+    
+    def b_sample(self, key, n_samples):
+        keys = random.split(key, n_samples)
+        return vmap(self.sample)(keys)
+    
+    def b_log_prob(self, x):
+        return vmap(self.log_prob(x))
 
 class Gaussian(Distribution):
     """A standard multivariate Gaussian distribution N(0, I)."""
@@ -44,9 +51,9 @@ class Gaussian(Distribution):
         self.mean = jnp.zeros(dim)
         self.cov = jnp.eye(dim)
 
-    def sample(self, key, shape=(1,)):
+    def sample(self, key):
         """Samples from the Gaussian distribution."""
-        return jax.random.multivariate_normal(key, self.mean, self.cov, shape)
+        return jax.random.multivariate_normal(key, self.mean, self.cov)
 
     def log_prob(self, x):
         """Computes the log probability of a sample."""
@@ -103,37 +110,28 @@ class GaussianMixture(Distribution):
         self.covs = covs
         self.log_weights = jnp.log(weights)
 
-    def sample(self, key, shape=(1,)):
+    def sample(self, key):
         """
-        Samples from the Gaussian mixture model.
+        Samples a single example from the Gaussian mixture model.
         This is a two-step process:
-        1. For each sample, choose a component based on the mixture weights.
+        1. Choose a component based on the mixture weights.
         2. Sample from the chosen Gaussian component.
         """
-        n_samples = shape[0]
-        key_cat, key_samps = jax.random.split(key)
+        key_choice, key_sample = jax.random.split(key)
 
-        # 1. Choose a component for each sample
-        component_indices = jax.random.choice(
-            key_cat, self.n_components, shape=(n_samples,), p=self.weights
+        # 1. Choose a single component index based on the weights
+        component_index = jax.random.choice(
+            key_choice, self.n_components, p=self.weights
         )
 
-        # 2. Get the parameters for the chosen components
-        chosen_means = self.means[component_indices]
-        chosen_covs = self.covs[component_indices]
+        # 2. Get the parameters for the chosen component
+        chosen_mean = self.means[component_index]
+        chosen_cov = self.covs[component_index]
 
-        # Generate a unique key for each sample and draw from the corresponding Gaussian
-        # We use vmap to efficiently sample from different Gaussians for each row.
-        keys = jax.random.split(key_samps, n_samples)
+        # 3. Sample from the chosen Gaussian component
+        sample = jax.random.multivariate_normal(key_sample, chosen_mean, chosen_cov)
         
-        # Define a function to sample one point given one key, mean, and cov
-        def sample_single(k, m, c):
-            return jax.random.multivariate_normal(k, m, c)
-
-        # Vectorize this function to apply it over the batch of keys and parameters
-        samples = jax.vmap(sample_single)(keys, chosen_means, chosen_covs)
-        
-        return samples
+        return sample
 
     def log_prob(self, x):
         return gmm_log_p(self.means, self.covs, self.log_weights, x)
@@ -150,19 +148,19 @@ class FlowDistribution(Distribution):
         self.flow = flow
         self.base = base_distribution
 
-    def sample(self, key, shape=(1,)):
+    def sample(self, key):
         """
         Generates samples by transforming samples from the base distribution.
         Assumes the flow maps from the base (Gaussian) to the target distribution.
         """
-        x0 = self.base.sample(key, shape)
-        y = self.flow.b_forward(x0)
+        x0 = self.base.sample(key)
+        y = self.flow.forward(x0)
         return y
 
     def log_prob(self, x1):
-        x0 = self.flow.b_backward(x1)
+        x0 = self.flow.backward(x1)
         log_p_x0 = self.base_distribution.log_p(x0)
-        return self.flow.b_push_forward_log_prob(log_p_x0, x0)
+        return self.flow.push_forward_log_prob(log_p_x0, x0)
 
 class ProcessDistribution(Distribution):
     """
@@ -181,13 +179,13 @@ class ProcessDistribution(Distribution):
         self.process = process
         self.base = base_distribution
 
-    def sample(self, key, shape=(1,)):
+    def sample(self, key):
         """
         Generates samples by solving the forward SDE from base samples.
         """
-        keys = jax.random.split(key, shape[0])
-        x0 = self.base.sample(key, shape)
-        y = self.process.b_forward(x0, keys)[0]
+        key1, key2 = jax.random.split(key)
+        x0 = self.base.sample(key1)
+        y = self.process.forward(x0, key2)[0]
         return y
 
     def log_prob(self, x):
