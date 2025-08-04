@@ -93,6 +93,16 @@ class FlowBasedPosterior(FlowDistribution):
         x1_samples = f.b_forward(x0_samples)
         return x1_samples
     
+    def log_prob(self, x1):
+        velocity_fn = lambda x, t: self.model.get_velocity_b(self.vel_params, x, t)
+        f = flow.Flow(velocity_fn, self.n_steps)
+
+        x0 = f.b_backward(x1)
+        log_p_x0 = self.base_distribution.log_p(x0)
+        log_p_x1 = f.b_push_forward_log_prob(log_p_x0, x0)
+
+        return log_p_x1
+    
     def entropy(self, num_samples: int):
         velocity_fn = lambda x, t: self.model.get_velocity_b(self.vel_params, x, t)
         f = flow.Flow(velocity_fn, self.n_steps)
