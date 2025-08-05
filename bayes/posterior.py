@@ -14,6 +14,7 @@ from sinterp.interpolants import (
 from sinterp.stochasticfield import OneSidedField
 from flow import flow
 from bayes.distribution import Gaussian, FlowDistribution
+from sinterp.couplings import EMDCoupling
 
 # A simple utility to manage JAX random keys
 class PRNGKeyManager:
@@ -60,7 +61,7 @@ class FlowBasedPosterior(FlowDistribution):
         self.interpolator = interpolator
         self.num_train_steps = num_train_steps
 
-        # self.b_sample = super().b_sample
+        self.coupling = EMDCoupling()
 
         vel_nn = VelocityNet(dim=self.dim)
 
@@ -114,9 +115,15 @@ class FlowBasedPosterior(FlowDistribution):
         # we dont have access to likelihoodscore_t, rather we use at t=1
         s_likelihood_1 = total_log_likelihood_grad_fn(eta_1, y_data)
 
+        max_guidance_norm = 10.0
+
+        # Clip the norm of the likelihood score to prevent explosions
+        likelihood_norm = jnp.linalg.norm(s_likelihood_1)
+        clipped_s_likelihood_1 = s_likelihood_1 * jnp.minimum(1.0, max_guidance_norm / (likelihood_norm + 1e-6))
+
         # Return the combined, guided score
         # our bayesian update
-        return s_prior_t + guidance_strength * s_likelihood_1
+        return s_prior_t + guidance_strength * clipped_s_likelihood_1
 
     def get_current_flow(self):
         """
@@ -155,9 +162,10 @@ class FlowBasedPosterior(FlowDistribution):
         f = flow.Flow(b_velocity_fn, self.n_steps)
         return f
 
-    def sample(self, key):
+    def sample(self, key, x0_samples=None):
         f = self.get_current_flow()
-        x0_samples = self.base_distribution.sample(key)
+        if x0_samples is None:
+            x0_samples = self.base_distribution.sample(key)
         x1_samples = f.forward(x0_samples)
         return x1_samples
     
@@ -190,6 +198,9 @@ class FlowBasedPosterior(FlowDistribution):
             We simply want to force the current score to include the observed data.
             To Bayesian update via posterior_score = prior_score + likelihood_score.  
             """
+
+            # alternative ways to do this.
+            # step in direction of likelihood. but also say within a trust region?
             
             xt_batch = vmap(self.interpolator)(x0_batch, x1_batch, z_batch, t_batch)
             
@@ -203,7 +214,7 @@ class FlowBasedPosterior(FlowDistribution):
             )
             
             # The loss is the difference between the predicted score and the (fixed) target score
-            return jnp.sum((pred_score - jax.lax.stop_gradient(target_score))**2)
+            return jnp.mean((pred_score - jax.lax.stop_gradient(target_score))**2)
 
         # The train_step and training loop remain the same...
         @jit
@@ -214,16 +225,17 @@ class FlowBasedPosterior(FlowDistribution):
             p = optax.apply_updates(vel_params, up)
             return p, opt, loss
 
-        # TODO not sure about this step!
-        x1_samples_for_training = self.b_sample(self.key_manager.split(), 1024)
         for step in range(self.num_train_steps):
             # ... (batch creation logic) ...
-            batch_x1 = x1_samples_for_training[jax.random.randint(self.key_manager.split(), (batch_size,), 0, x1_samples_for_training.shape[0])]
+            # use our own flow to couple the distributions
             batch_x0 = jax.random.normal(self.key_manager.split(), shape=(batch_size, self.dim))
+            batch_x1 = vmap(self.sample, in_axes=(None, 0))(self.key_manager.split(), batch_x0)
+
             batch_z = jax.random.normal(self.key_manager.split(), shape=(batch_size, self.dim))
             batch_t = jax.random.uniform(self.key_manager.split(), shape=(batch_size,), minval=epsilon, maxval=1.0 - epsilon)
 
-            # TODO add OT coupling
+            # OT coupling
+            # batch_x0, batch_x1 = self.coupling(self.key_manager.split(), batch_x0, batch_x1)
 
             self.vel_params, self.opt_state, loss = train_step(
                 self.vel_params, self.opt_state,

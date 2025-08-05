@@ -1,12 +1,8 @@
 import jax.numpy as jnp
-from jax import random
+from jax import random, jit
 import jax
 
-from ott.geometry import pointcloud
-from ott.problems.linear import linear_problem
-from ott.solvers.linear import sinkhorn
-from ott.solvers.utils import sample_joint
-
+import ot
 
 class Coupling():
     def __call__(self, x, y=None, unused_key=None):
@@ -37,19 +33,63 @@ class ConditionalCoupling(Coupling):
         return x, y
 
 class EMDCoupling(Coupling):
-    def __init__(self):
-        pass
+    def __init__(self, reg=1e-1, max_iter=30):
+        """
+        Initializes the EMD-based coupling.
 
-    def sample(self, x, y, key):
-        a = jnp.ones(x.shape[0]) / x.shape[0]
-        b = jnp.ones(y.shape[0]) / y.shape[0]
-        geom = pointcloud.PointCloud(x, y)
-        prob = linear_problem.LinearProblem(geom, a, b)
+        Args:
+            reg (float): The regularization parameter for the Sinkhorn algorithm.
+            max_iter (int): The maximum number of Sinkhorn iterations.
+        """
+        self.reg = reg
+        self.max_iter = max_iter
+        self.__call__ = jit(self.__call__)
 
-        solver = sinkhorn.Sinkhorn()
-        out = solver(prob)
+    def __call__(self, key, x, y):
+        """
+        Computes the optimal transport coupling between x and y and samples from it.
 
-        i, j = sample_joint(key, out.matrix)
+        Args:
+            key (jax.random.PRNGKey): The random key for sampling.
+            x (jnp.ndarray): The first batch of samples (n, d).
+            y (jnp.ndarray): The second batch of samples (m, d).
+
+        Returns:
+            A tuple (x_hat, y_hat) representing the coupled samples.
+        """
+        n = x.shape[0]
+        m = y.shape[0]
+
+        # Define the marginal distributions (uniform in this case)
+        a = jnp.ones(n) / n
+        b = jnp.ones(m) / m
+
+        # 1. Compute the cost matrix M (squared Euclidean distance)
+        # ot.dist uses numpy by default, so we convert JAX arrays.
+        M = ot.dist(x, y)
+        # It's good practice to normalize the cost matrix to prevent numerical issues.
+        M /= M.max()
+
+        # 2. Solve the regularized optimal transport problem (Sinkhorn)
+        # This function returns the transport plan Gs.
+        Gs = ot.sinkhorn(a, b, M, self.reg, numItermax=self.max_iter)
+
+        # 3. Sample from the transport plan Gs to get the coupled pairs.
+        # We want to sample n pairs.
+        
+        # Flatten the transport matrix to a 1D probability distribution
+        p = Gs.flatten()
+        
+        # Generate n samples of indices from the flattened distribution
+        # The indices range from 0 to n*m - 1.
+        all_indices = jnp.arange(n * m)
+        sampled_indices = random.choice(key, a=all_indices, shape=(n,), p=p)
+        
+        # Convert the 1D indices back to 2D indices (i, j)
+        i = sampled_indices // m  # Row indices (for x)
+        j = sampled_indices % m   # Column indices (for y)
+        
+        # Return the new coupled samples
         return x[i], y[j]
 
 class Rectification(Coupling):

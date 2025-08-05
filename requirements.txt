@@ -3,7 +3,7 @@ jaxlib
 pytest
 matplotlib
 parameterized
-POT
+POT[backend-jax]
 scipy
 flax
 optax
