@@ -52,7 +52,7 @@ class VelocityNet(nn.Module):
         return out
 
 class FlowBasedPosterior(FlowDistribution):
-    def __init__(self, build_total_log_likelihood_and_grad, dim: int, key_manager: PRNGKeyManager, interpolator: Interpolator, learning_rate: float = 1e-4, distillation_threshold: int = 50, n_steps: int = 100, num_train_steps: int = 1000):
+    def __init__(self, build_total_log_likelihood_and_grad, dim: int, key_manager: PRNGKeyManager, interpolator: Interpolator, learning_rate: float = 1e-4, distillation_threshold: int = 50, n_steps: int = 50, num_train_steps: int = 1000):
 
         self.dim = dim
         self.build_total_log_likelihood_and_grad = build_total_log_likelihood_and_grad
@@ -171,6 +171,13 @@ class FlowBasedPosterior(FlowDistribution):
             x0_samples = self.base_distribution.sample(key)
         x1_samples = f.forward(x0_samples)
         return x1_samples
+    
+    # @property
+    def entropy(self, num_samples):
+        # MCMC estimate
+        x1_samples = self.b_sample(self.key_manager.split(), num_samples)
+        log_p = self.b_log_prob(x1_samples)
+        return -jnp.sum(log_p * jnp.exp(log_p))
 
     def log_prob(self, x1):
         f = self.get_current_flow(self.vel_params)
