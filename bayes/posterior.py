@@ -3,6 +3,7 @@ import jax.numpy as jnp
 from jax import grad, jit, vmap, value_and_grad
 from functools import partial
 # jax.config.update("jax_debug_nans", True)
+# jax.config.update('jax_disable_jit', True)
 
 import flax.linen as nn
 import optax
@@ -12,6 +13,7 @@ from sinterp.interpolants import (
     Interpolator, 
     OneSidedLinear)
 from sinterp.stochasticfield import OneSidedField
+from sinterp.losses import make_loss_b
 from flow import flow
 from bayes.distribution import Gaussian, FlowDistribution
 from sinterp.couplings import EMDCoupling
@@ -125,21 +127,20 @@ class FlowBasedPosterior(FlowDistribution):
         # our bayesian update
         return s_prior_t + guidance_strength * clipped_s_likelihood_1
 
-    def get_current_flow(self):
+    def get_current_flow(self, params, use_prior=False):
         """
         Constructs the flow object with the appropriate velocity field.
         If observations are present, it uses a guided velocity field.
         """
-        if not self.observation_buffer:
+        if (not self.observation_buffer) or use_prior:
             # Unconditional case: just use the model's learned velocity b
-            b_velocity_fn = lambda x, t: self.model.get_velocity_b(self.vel_params, x, t)
+            b_velocity_fn = lambda x, t: self.model.get_velocity_b(params, x, t)
         else:
             # Guided case: construct the guided velocity b_guided
             total_log_likelihood_grad_fn, y_data = self.build_total_log_likelihood_and_grad(self.observation_buffer)
 
             def b_guided_velocity_fn(x, t):
                 # For sampling, we always use the current, live parameters
-                params = self.vel_params
                 
                 # Get the deterministic part of the velocity, v(t,x)
                 v_velocity = self.model.get_velocity_v(params, x, t)
@@ -162,15 +163,17 @@ class FlowBasedPosterior(FlowDistribution):
         f = flow.Flow(b_velocity_fn, self.n_steps)
         return f
 
-    def sample(self, key, x0_samples=None):
-        f = self.get_current_flow()
+    def sample(self, key, x0_samples=None, params=None, use_prior=False):
+        if params is None:
+            params = self.vel_params
+        f = self.get_current_flow(params, use_prior)
         if x0_samples is None:
             x0_samples = self.base_distribution.sample(key)
         x1_samples = f.forward(x0_samples)
         return x1_samples
-    
+
     def log_prob(self, x1):
-        f = self.get_current_flow()
+        f = self.get_current_flow(self.vel_params)
         x0 = f.backward(x1)
         log_p_x0 = self.base_distribution.log_prob(x0)
         log_p_x1, _ = f.push_forward_log_prob(log_p_x0, x0)
@@ -192,31 +195,38 @@ class FlowBasedPosterior(FlowDistribution):
         # Use frozen parameters for calculating the target
         frozen_params = jax.lax.stop_gradient(self.vel_params)
 
+        # def loss_fn(vel_params, x0_batch, x1_batch, z_batch, t_batch, y_data_arg):
+        #     """
+        #     We are not doing stochastic interpolation training as usual.
+        #     We simply want to force the current score to include the observed data.
+        #     To Bayesian update via posterior_score = prior_score + likelihood_score.  
+        #     """
+
+        #     # alternative ways to do this.
+        #     # step in direction of likelihood. but also say within a trust region?
+            
+        #     xt_batch = vmap(self.interpolator)(x0_batch, x1_batch, z_batch, t_batch)
+            
+        #     # The score predicted by the current trainable parameters
+        #     pred_score = vmap(self.model.get_score_s, in_axes=(None, 0, 0))(vel_params, xt_batch, t_batch)
+
+        #     # The target score is now calculated cleanly using our helper method
+        #     # We use the frozen_params here to define a stable target.
+        #     target_score = vmap(self._get_target_score, in_axes=(None, 0, 0, None, None, None))(
+        #         frozen_params, xt_batch, t_batch, total_log_likelihood_grad_fn, y_data_arg, guidance_strength
+        #     )
+            
+        #     # The loss is the difference between the predicted score and the (fixed) target score
+        #     return jnp.mean((pred_score - jax.lax.stop_gradient(target_score))**2)
+
+        loss_b = make_loss_b(self.interpolator, self.model.get_velocity_v)
         def loss_fn(vel_params, x0_batch, x1_batch, z_batch, t_batch, y_data_arg):
             """
-            We are not doing stochastic interpolation training as usual.
-            We simply want to force the current score to include the observed data.
-            To Bayesian update via posterior_score = prior_score + likelihood_score.  
+            We can sample from the posterior using our non-parametric estimate.
+            We want to match our current prior flow to this non-parametric posterior.
             """
+            return jnp.mean(vmap(loss_b, in_axes=(None, 0, 0, 0, 0))(vel_params, x0_batch, x1_batch, z_batch, t_batch))
 
-            # alternative ways to do this.
-            # step in direction of likelihood. but also say within a trust region?
-            
-            xt_batch = vmap(self.interpolator)(x0_batch, x1_batch, z_batch, t_batch)
-            
-            # The score predicted by the current trainable parameters
-            pred_score = vmap(self.model.get_score_s, in_axes=(None, 0, 0))(vel_params, xt_batch, t_batch)
-
-            # The target score is now calculated cleanly using our helper method
-            # We use the frozen_params here to define a stable target.
-            target_score = vmap(self._get_target_score, in_axes=(None, 0, 0, None, None, None))(
-                frozen_params, xt_batch, t_batch, total_log_likelihood_grad_fn, y_data_arg, guidance_strength
-            )
-            
-            # The loss is the difference between the predicted score and the (fixed) target score
-            return jnp.mean((pred_score - jax.lax.stop_gradient(target_score))**2)
-
-        # The train_step and training loop remain the same...
         @jit
         def train_step(vel_params, opt, x0, x1, z, t, y_data_arg):
             (loss, (g,)) = value_and_grad(loss_fn, argnums=(0,))(vel_params, x0, x1, z, t, y_data_arg)
@@ -227,15 +237,19 @@ class FlowBasedPosterior(FlowDistribution):
 
         for step in range(self.num_train_steps):
             # ... (batch creation logic) ...
-            # use our own flow to couple the distributions
             batch_x0 = jax.random.normal(self.key_manager.split(), shape=(batch_size, self.dim))
-            batch_x1 = vmap(self.sample, in_axes=(None, 0))(self.key_manager.split(), batch_x0)
+            
+            # BUG for loss_b we should be sampling from the frozen prior + parametric score
+            batch_x1 = vmap(self.sample, in_axes=(None, 0, None, None))(self.key_manager.split(), batch_x0, frozen_params, False)            
+            # for score_matching_loss_fn we should be sampling from
+            # batch_x1 = vmap(self.sample, in_axes=(None, 0, None, None))(self.key_manager.split(), batch_x0, frozen_params, True)
+            # coupling
+            # use our own flow to couple the distributions p(x0, x1) = p(x1 | x0)p(x0)!
+            # could use OT coupling 
+            # batch_x0, batch_x1 = self.coupling(self.key_manager.split(), batch_x0, batch_x1)
 
             batch_z = jax.random.normal(self.key_manager.split(), shape=(batch_size, self.dim))
             batch_t = jax.random.uniform(self.key_manager.split(), shape=(batch_size,), minval=epsilon, maxval=1.0 - epsilon)
-
-            # OT coupling
-            # batch_x0, batch_x1 = self.coupling(self.key_manager.split(), batch_x0, batch_x1)
 
             self.vel_params, self.opt_state, loss = train_step(
                 self.vel_params, self.opt_state,
