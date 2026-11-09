@@ -1,9 +1,0 @@
-jax
-jaxlib
-pytest
-matplotlib
-parameterized
-POT[backend-jax]
-scipy
-flax
-optax
